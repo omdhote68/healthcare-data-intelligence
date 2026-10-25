@@ -33,7 +33,7 @@ COLUMN_ALIASES = {
     "city": ["city", "town", "location"],
     "phone": ["phone", "phonenumber", "telephone", "tel", "contactnumber", "mobile"],
     "website": ["website", "web", "url", "site", "websiteurl"],
-    "source_url": ["sourceurl", "source", "sourcelink", "datasource", "reference"],
+    "source_url": ["sourceurl", "sourcelink", "reference"],
 }
 
 # Columns a record needs to be considered "complete".
