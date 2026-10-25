@@ -1,0 +1,7 @@
+pandas>=2.0
+openpyxl>=3.1
+streamlit>=1.30
+pytest>=7.0
+python-dotenv>=1.0
+# Optional: only needed for the AI features (the app works without it)
+anthropic>=0.40
