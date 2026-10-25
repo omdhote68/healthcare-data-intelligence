@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from src.config import DEFAULT_AI_MODEL, MAX_AI_ITEMS
+from src.config import MAX_AI_ITEMS
 from src.logger import get_logger
 
 logger = get_logger()
@@ -101,28 +101,50 @@ def classify_rules(specialty, practice_name):
 # --------------------------------------------------------------------------
 # AI plumbing
 # --------------------------------------------------------------------------
+
 def get_ai_caller():
-    """Return a function f(system, prompt) -> text, or None if AI is unavailable."""
-    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    """Return a Gemini API caller, or None if AI is not configured."""
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+
+    # Read the key from Streamlit Cloud Secrets if needed.
+    if not key:
+        try:
+            import streamlit as st
+            key = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
+        except Exception:
+            key = ""
+
     if not key:
         return None
+
     try:
-        import anthropic
+        from google import genai
     except ImportError:
-        logger.warning("ANTHROPIC_API_KEY is set but the 'anthropic' package is not installed.")
+        logger.warning(
+            "Gemini key is configured, but google-genai is not installed."
+        )
         return None
 
-    client = anthropic.Anthropic(api_key=key)
-    model = os.getenv("ANTHROPIC_MODEL", DEFAULT_AI_MODEL)
+    try:
+        client = genai.Client(api_key=key)
+    except Exception as exc:
+        logger.warning("Could not initialise Gemini client: %s", exc)
+        return None
+
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     def call(system: str, prompt: str) -> str:
-        response = client.messages.create(
-            model=model, max_tokens=1500, system=system,
-            messages=[{"role": "user", "content": prompt}],
+        response = client.models.generate_content(
+            model=model,
+            contents=f"{system}\n\n{prompt}",
         )
-        return "".join(b.text for b in response.content if getattr(b, "type", "") == "text")
+        text = getattr(response, "text", None)
+        if not text:
+            raise ValueError("Gemini returned an empty response.")
+        return text
 
     return call
+
 
 
 def ai_available() -> bool:
