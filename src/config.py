@@ -22,6 +22,7 @@ STANDARD_COLUMNS = [
     "phone",
     "website",
     "source_url",
+    
 ]
 
 # --- Alternative column names we recognise -----------------------------
@@ -34,6 +35,7 @@ COLUMN_ALIASES = {
     "phone": ["phone", "phonenumber", "telephone", "tel", "contactnumber", "mobile"],
     "website": ["website", "web", "url", "site", "websiteurl"],
     "source_url": ["sourceurl", "sourcelink", "reference"],
+    
 }
 
 # Columns a record needs to be considered "complete".
