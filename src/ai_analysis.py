@@ -131,7 +131,7 @@ def get_ai_caller():
         logger.warning("Could not initialise Gemini client: %s", exc)
         return None
 
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
     def call(system: str, prompt: str) -> str:
         response = client.models.generate_content(
