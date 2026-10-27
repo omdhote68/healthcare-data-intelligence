@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from src.ai_analysis import (
-    CATEGORIES, classify_rules, parse_json_response, run_ai_analysis,
+    CATEGORIES, classify_rules, get_ai_caller, parse_json_response, run_ai_analysis,
     validate_categories, validate_explanations, validate_summary,
 )
 
@@ -69,6 +69,36 @@ def test_validate_explanations_keeps_only_known_issue_types():
     payload = {"explanations": {"invalid_phone": "The phone number looks wrong; check the source.",
                                 "invented_type": "This should be ignored by the validator."}}
     assert list(validate_explanations(payload, {"invalid_phone"})) == ["invalid_phone"]
+
+
+@pytest.mark.parametrize("legacy_model", ["gemini-2.5-flash", "models/gemini-2.5-flash"])
+def test_get_ai_caller_upgrades_legacy_model(monkeypatch, legacy_model):
+    import src.ai_analysis as ai_analysis
+
+    requested_models = []
+
+    class FakeModels:
+        def generate_content(self, model, contents):
+            requested_models.append(model)
+            return type("Response", (), {"text": "ok"})()
+
+    class FakeClient:
+        models = FakeModels()
+
+    class FakeGenai:
+        @staticmethod
+        def Client(api_key):
+            return FakeClient()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", legacy_model)
+    monkeypatch.setattr(ai_analysis, "genai", FakeGenai, raising=False)
+    monkeypatch.setitem(__import__("sys").modules, "google.genai", FakeGenai)
+
+    caller = get_ai_caller()
+    assert caller is not None
+    caller("system", "prompt")
+    assert requested_models == ["gemini-3.8-flash"]
 
 
 # ---- full run with a fake AI -------------------------------------------------
