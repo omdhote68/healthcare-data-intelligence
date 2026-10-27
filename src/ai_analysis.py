@@ -13,6 +13,7 @@ Safety rules for AI output:
   * AI never decides whether a record is correct; it only labels and describes.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -149,6 +150,35 @@ def get_ai_caller():
     return call
 
 
+def cache_ai_caller(caller, response_cache):
+    """Reuse successful responses for identical prompts within the caller's session."""
+    def call(system: str, prompt: str) -> str:
+        cache_key = hashlib.sha256(f"{system}\0{prompt}".encode("utf-8")).hexdigest()
+        if cache_key in response_cache:
+            return response_cache[cache_key]
+        response = caller(system, prompt)
+        response_cache[cache_key] = response
+        if len(response_cache) > 32:
+            response_cache.pop(next(iter(response_cache)))
+        return response
+
+    return call
+
+
+def _is_quota_error(exc):
+    message = str(exc).lower()
+    return "429" in message or "resource_exhausted" in message or "quota" in message
+
+
+def _friendly_api_error(exc):
+    message = str(exc).lower()
+    if _is_quota_error(exc):
+        return "Gemini quota limit reached. Check your quota or retry after it resets."
+    if "503" in message or "unavailable" in message or "high demand" in message:
+        return "Gemini is temporarily busy. Please try again later."
+    return "Gemini could not complete this request. Check the API key and model settings."
+
+
 
 def ai_available() -> bool:
     return get_ai_caller() is not None
@@ -276,6 +306,7 @@ def run_ai_analysis(kept, issues, metrics, use_ai=False, caller=None) -> AIResul
                                    "rule-based results were used instead.")
     ai_on = use_ai and caller is not None
     fallbacks = 0
+    quota_exhausted = False
 
     # 2) AI categorisation for records the rules could not place
     if ai_on:
@@ -307,15 +338,25 @@ def run_ai_analysis(kept, issues, metrics, use_ai=False, caller=None) -> AIResul
                     result.warnings.append("Some AI category answers were invalid and were ignored.")
             except Exception as exc:  # noqa: BLE001
                 fallbacks += 1
+                quota_exhausted = _is_quota_error(exc)
                 logger.warning("AI categorisation failed: %s", exc)
-                result.warnings.append(f"AI categorisation failed ({exc}); rule-based categories kept.")
+                result.warnings.append(
+                    f"AI categorisation unavailable. {_friendly_api_error(exc)} Rule-based categories kept."
+                )
     result.categories = categories
 
     category_counts = categories["specialty_category"].value_counts()
 
-    # 3) Summary
+    # 3) Summary and issue explanations share one request.
     summary, recs = _template_summary(metrics, category_counts, all_issue_counts)
-    if ai_on:
+    explanations = {k: ISSUE_EXPLANATIONS[k] for k in all_issue_counts.index if k in ISSUE_EXPLANATIONS}
+    sources = {k: "template" for k in explanations}
+    if ai_on and quota_exhausted:
+        fallbacks += 2
+        result.warnings.append(
+            "AI summary and explanations skipped because the Gemini quota was exhausted; templates used."
+        )
+    elif ai_on:
         facts = {
             "metrics": metrics,
             "category_counts": category_counts.to_dict(),
@@ -325,41 +366,44 @@ def run_ai_analysis(kept, issues, metrics, use_ai=False, caller=None) -> AIResul
         prompt = (
             "Write a concise summary (2-4 sentences) of this dataset's cleaning results for a "
             "non-technical reader, plus up to 4 short recommendations. Use ONLY the numbers in the "
-            "facts below and do not compute new ones. State that records are not externally verified.\n"
-            'Reply as JSON: {"summary": "...", "recommendations": ["..."]}\n'
-            f"Facts: {json.dumps(facts)}"
-        )
-        try:
-            summary, recs = validate_summary(parse_json_response(caller(SYSTEM_PROMPT, prompt)), allowed)
-        except Exception as exc:  # noqa: BLE001
-            fallbacks += 1
-            logger.warning("AI summary failed validation: %s", exc)
-            result.warnings.append(f"AI summary rejected ({exc}); template summary used.")
-    result.summary, result.recommendations = summary, recs
-
-    # 4) Issue explanations
-    explanations = {k: ISSUE_EXPLANATIONS[k] for k in all_issue_counts.index if k in ISSUE_EXPLANATIONS}
-    sources = {k: "template" for k in explanations}
-    if ai_on and explanations:
-        prompt = (
-            "For each issue type below, write ONE plain-English sentence (max 40 words) explaining "
-            "what it means and what a person should do. Do not claim anything is verified or wrong "
-            "beyond what the issue type says.\n"
-            'Reply as JSON: {"explanations": {"<issue_type>": "<sentence>"}}\n'
+            "facts below and do not compute new ones. State that records are not externally verified. "
+            "Also write one plain-English sentence for each issue type, explaining what it means and "
+            "what a person should do. Do not claim anything is verified or wrong beyond the issue type.\n"
+            'Reply as JSON: {"summary": "...", "recommendations": ["..."], '
+            '"explanations": {"<issue_type>": "<sentence>"}}\n'
+            f"Facts: {json.dumps(facts)}\n"
             f"Issue types and counts: {json.dumps(all_issue_counts.to_dict())}"
         )
         try:
-            valid = validate_explanations(parse_json_response(caller(SYSTEM_PROMPT, prompt)),
-                                          set(explanations))
-            for key, text in valid.items():
-                explanations[key] = text
-                sources[key] = "ai (validated)"
-            if len(valid) < len(explanations):
-                fallbacks += 1
+            payload = parse_json_response(caller(SYSTEM_PROMPT, prompt))
         except Exception as exc:  # noqa: BLE001
-            fallbacks += 1
-            logger.warning("AI explanations failed validation: %s", exc)
-            result.warnings.append(f"AI explanations rejected ({exc}); template text used.")
+            fallbacks += 2
+            quota_exhausted = _is_quota_error(exc)
+            logger.warning("AI report request failed: %s", exc)
+            message = _friendly_api_error(exc)
+            result.warnings.append(f"AI summary unavailable. {message} Template summary used.")
+            result.warnings.append(f"AI explanations unavailable. {message} Template text used.")
+        else:
+            try:
+                summary, recs = validate_summary(payload, allowed)
+            except (TypeError, ValueError):
+                fallbacks += 1
+                result.warnings.append("AI summary was not accepted; template summary used.")
+
+            try:
+                valid = validate_explanations(payload, set(explanations))
+                for key, text in valid.items():
+                    explanations[key] = text
+                    sources[key] = "ai (validated)"
+                if len(valid) < len(explanations):
+                    fallbacks += 1
+                    result.warnings.append(
+                        "Some AI explanations were missing or invalid; template text used for those issues."
+                    )
+            except (TypeError, ValueError):
+                fallbacks += 1
+                result.warnings.append("AI explanations were not accepted; template text used.")
+    result.summary, result.recommendations = summary, recs
 
     result.explanations = pd.DataFrame({
         "issue_type": list(explanations),

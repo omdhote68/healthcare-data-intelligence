@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from src.ai_analysis import (
-    CATEGORIES, classify_rules, get_ai_caller, parse_json_response, run_ai_analysis,
+    CATEGORIES, cache_ai_caller, classify_rules, get_ai_caller, parse_json_response, run_ai_analysis,
     validate_categories, validate_explanations, validate_summary,
 )
 
@@ -71,6 +71,19 @@ def test_validate_explanations_keeps_only_known_issue_types():
     assert list(validate_explanations(payload, {"invalid_phone"})) == ["invalid_phone"]
 
 
+def test_cached_ai_caller_reuses_successful_prompt_responses():
+    calls = []
+
+    def fake(system, prompt):
+        calls.append((system, prompt))
+        return "cached response"
+
+    caller = cache_ai_caller(fake, {})
+    assert caller("system", "prompt") == "cached response"
+    assert caller("system", "prompt") == "cached response"
+    assert calls == [("system", "prompt")]
+
+
 @pytest.mark.parametrize("legacy_model", ["gemini-2.5-flash", "models/gemini-2.5-flash"])
 def test_get_ai_caller_upgrades_legacy_model(monkeypatch, legacy_model):
     import src.ai_analysis as ai_analysis
@@ -125,17 +138,23 @@ def test_run_without_ai_is_rule_based():
 
 def test_run_with_good_fake_ai_uses_validated_answers():
     kept, issues, metrics = _fixture()
+    calls = []
 
     def fake(system, prompt):
+        calls.append(prompt)
         if "Classify" in prompt:
             return json.dumps({"items": [{"id": 0, "category": "Unknown"}, {"id": 1, "category": "Other"}]})
-        if "summary" in prompt.lower() and "Facts" in prompt:
-            return json.dumps({"summary": "Two records were imported and none have been externally verified.",
-                               "recommendations": ["Fill in the missing field."]})
-        return json.dumps({"explanations": {"missing_value": "A required field is empty; look it up from a trusted source."}})
+        return json.dumps({
+            "summary": "Two records were imported and none have been externally verified.",
+            "recommendations": ["Fill in the missing field."],
+            "explanations": {
+                "missing_value": "A required field is empty; look it up from a trusted source."
+            },
+        })
 
     result = run_ai_analysis(kept, issues, metrics, use_ai=True, caller=fake)
     assert result.mode == "ai"
+    assert len(calls) == 2
     assert result.summary.startswith("Two records")
     assert result.explanations["source"].iloc[0] == "ai (validated)"
 
@@ -151,6 +170,21 @@ def test_run_with_bad_ai_output_falls_back_safely():
     assert result.warnings
     assert result.summary                              # template summary still produced
     assert result.explanations["source"].iloc[0] == "template"
+
+
+def test_quota_failure_skips_remaining_ai_requests():
+    kept, issues, metrics = _fixture()
+    calls = []
+
+    def quota_error(system, prompt):
+        calls.append(prompt)
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: daily quota exceeded")
+
+    result = run_ai_analysis(kept, issues, metrics, use_ai=True, caller=quota_error)
+    assert len(calls) == 1
+    assert result.mode == "ai (with fallbacks)"
+    assert any("quota limit reached" in warning for warning in result.warnings)
+    assert all("RESOURCE_EXHAUSTED" not in warning for warning in result.warnings)
 
 
 def test_ai_that_invents_a_category_is_ignored():

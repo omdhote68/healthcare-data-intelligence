@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # reads ANTHROPIC_API_KEY from a local .env file if present
 
-from src.ai_analysis import ai_available  # noqa: E402
+from src.ai_analysis import ai_available, cache_ai_caller, get_ai_caller  # noqa: E402
 from src.config import SAMPLE_FILE, SEVERITY_ORDER  # noqa: E402
 from src.exporter import (  # noqa: E402
     cleaned_for_export, to_csv_bytes, to_excel_bytes, workbook_sheets,
@@ -68,12 +68,18 @@ if run_clicked:
         st.warning("Please choose a CSV or Excel file first.")
     else:
         try:
+            ai_caller = get_ai_caller() if use_ai else None
+            if ai_caller is not None:
+                response_cache = st.session_state.setdefault("_gemini_response_cache", {})
+                ai_caller = cache_ai_caller(ai_caller, response_cache)
             with st.spinner("Cleaning and analysing your data..."):
                 if source_choice == "Use sample data":
-                    result = run_pipeline(SAMPLE_FILE, use_ai=use_ai)
+                    result = run_pipeline(SAMPLE_FILE, use_ai=use_ai, ai_caller=ai_caller)
                     label = "sample_practices.csv (fictional sample)"
                 else:
-                    result = run_pipeline(uploaded, filename=uploaded.name, use_ai=use_ai)
+                    result = run_pipeline(
+                        uploaded, filename=uploaded.name, use_ai=use_ai, ai_caller=ai_caller
+                    )
                     label = uploaded.name
             st.session_state["result"] = result
             st.session_state["label"] = label
